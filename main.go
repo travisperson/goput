@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"crypto/sha256"
 	"encoding/json"
-	"container/list"
+	//"container/list"
 	"time"
 )
 
@@ -22,17 +22,17 @@ type FileStore struct {
 	memory_limit	int
 }
 
-func (*fs FileStore) MakeFile(content []byte, content_type, file_name string) *File {
+func (fs *FileStore) MakeFile(content []byte, content_type, file_name string) *File {
 	file := new (File)
 
-	file.content		= content;
-	file.CreatedAt		= time.Now();
+	file.content		= content
+	file.CreatedAt		= time.Now()
 	file.ContentType	= content_type
 	file.Name			= file_name
 	file.Length			= len(file.content)
-	file.Hash			= Hash(content);
+	file.Hash			= Hash(content)
 
-	MemoryUsed += file.Length
+	fs.memory_used += file.Length
 
 	// Catch all
 	if file.ContentType == "application/x-www-form-urlencoded" || len(file.ContentType) == 0 {
@@ -42,20 +42,29 @@ func (*fs FileStore) MakeFile(content []byte, content_type, file_name string) *F
 	return file
 }
 
-func (*fs FileStore) PutFileByHash(file *File) bool {
-	append(file_fifo,file)
-	return file_by_hash[file.Hash] = file
+func (fs *FileStore) PutFileByHash(file *File) bool {
+	fs.file_fifo = append(fs.file_fifo, file)
+	fs.file_by_hash[file.Hash] = file
+	_, ok := fs.file_by_hash[file.Hash]
+	return ok;
 }
 
-func (*fs FileStore) LinkFileToKey(key string, hash string) bool {
-	hash_by_key[key] = hash
+func (fs *FileStore) LinkFileToKey(key string, hash string) bool {
+
+	f, ok := fs.file_by_hash[hash]
+	f.Key = key
+
+	fs.hash_by_key[key] = hash
+	hash, ok  = fs.hash_by_key[key]
+	return ok;
 }
 
-func (*fs FileStore) GetFileByHash(hash string) *File, bool {
-	return fs.file_by_hash[params["id"]]
+func (fs *FileStore) GetFileByHash(hash string) (*File, bool) {
+	f, ok := fs.file_by_hash[hash]
+	return f, ok
 }
 
-func (*fs FileStore) GetFileByKey(key string) *File, bool {
+func (fs *FileStore) GetFileByKey(key string) (*File, bool) {
 	hash, ok := fs.GetHashByKey(key)
 
 	if !ok {
@@ -65,17 +74,18 @@ func (*fs FileStore) GetFileByKey(key string) *File, bool {
 	return fs.GetFileByHash(hash)
 }
 
-func (*fs FileStore) MakeRoomFor(size int) {
-	for  fs.memory_used + size > memory_limit {
-		f := file_fifo[0];
+func (fs *FileStore) MakeRoomFor(size int) {
+	for  fs.memory_used + size > fs.memory_limit {
+		f := fs.file_fifo[0];
 
-		delete(file_by_hash, f.Hash)
-		delete(file_by_key, f.Hash)
+		delete(fs.file_by_hash, f.Hash)
+		delete(fs.hash_by_key, f.Key)
 	}
 }
 
-func (*fs FileStore) GetHashByKey(key string) string, bool {
-	return fs.hash_by_key[key]
+func (fs *FileStore) GetHashByKey(key string) (string, bool) {
+	hash, ok := fs.hash_by_key[key]
+	return hash, ok
 }
 
 type File struct {
@@ -110,7 +120,11 @@ const (
 
 func main() {
 
-	fs = new FileStore
+	fs := new (FileStore)
+	
+	fs.file_by_hash	= make(map[string] *File)
+	fs.hash_by_key	= make(map[string] string)
+	fs.file_fifo	= make([]*File, 128)
 	
 	m := martini.Classic()
 
@@ -119,10 +133,14 @@ func main() {
 	})
 
 	m.Get("/:id", func(res http.ResponseWriter, params martini.Params) (int, []byte) {
-		file, ok := Files[params["id"]]
+
+		file, ok := fs.GetFileByHash(params["id"])
 
 		if !ok {
-			return 404, []byte(Stringify(JM{"Message": "The file you are trying to access does not exists."}))
+			file, ok = fs.GetFileByKey(params["id"])
+			if !ok {
+				return 404, []byte(Stringify(JM{"Message": "The file you are trying to access does not exists."}))
+			}
 		}
 
 		res.Header().Set("Content-Type", file.ContentType)
@@ -132,8 +150,7 @@ func main() {
 	})
 
 	m.Put("/:id", func(params martini.Params, request *http.Request) (int, []byte) {
-
-		_, ok := Files[params["id"]]
+		_, ok := fs.GetFileByKey(params["id"])
 
 		if ok {
 			return 404, []byte(Stringify(JM{"Message": "A file already exists at this location."}))
@@ -145,27 +162,14 @@ func main() {
 			fmt.Println(err)
 		}
 		
-		file := new (File)
-
-		file.content		= content;
-		file.CreatedAt		= time.Now();
-		file.ContentType	= request.Header.Get("Content-Type")
-		file.Name			= request.Header.Get("File-Name")
-		file.Length			= len(file.content)
-		file.Hash			= Hash(content);
-
-		MemoryUsed += file.Length
-
-		// Catch all
-		if file.ContentType == "application/x-www-form-urlencoded" || len(file.ContentType) == 0 {
-			file.ContentType = "application/octet-stream"
-		}
+		file := fs.MakeFile(content, request.Header.Get("Content-Type"), request.Header.Get("File-Name"))
 
 		if len(file.Name) == 0 {
 			file.Name = params["id"]
 		}
 	
-		Files[params["id"]] = file
+		fs.PutFileByHash(file)
+		fs.LinkFileToKey(params["id"], file.Hash)
 
 		b, err := json.Marshal(file)
 		if err != nil {
@@ -184,27 +188,13 @@ func main() {
 			fmt.Println(err)
 		}
 		
-		file := new (File)
-
-		file.content		= content;
-		file.CreatedAt		= time.Now();
-		file.ContentType	= request.Header.Get("Content-Type")
-		file.Name			= request.Header.Get("File-Name")
-		file.Length			= len(file.content)
-		file.Hash			= Hash(content);
-
-		MemoryUsed += file.Length
-
-		// Catch all
-		if file.ContentType == "application/x-www-form-urlencoded" || len(file.ContentType) == 0 {
-			file.ContentType = "application/octet-stream"
-		}
+		file := fs.MakeFile(content, request.Header.Get("Content-Type"), request.Header.Get("File-Name"))
 
 		if len(file.Name) == 0 {
 			file.Name = file.Hash[0:15]
 		}
 	
-		Files[file.Hash] = file
+		fs.PutFileByHash(file)
 
 		b, err := json.Marshal(file)
 		if err != nil {
